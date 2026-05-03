@@ -64,6 +64,17 @@ check_gate_branch() {
 }
 
 check_gate_clean() {
+    if ! git rev-parse --verify HEAD &>/dev/null; then
+        local untracked
+        untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -1)
+        if [[ -z "$untracked" ]] && [[ -z "$(git ls-files 2>/dev/null)" ]]; then
+            echo "  PASS  clean — empty repo, no files"
+            return 0
+        else
+            echo "  FAIL  clean — new repo with uncommitted files"
+            return 1
+        fi
+    fi
     if git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet HEAD 2>/dev/null; then
         local untracked
         untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -1)
@@ -117,14 +128,30 @@ check_gate_file() {
 
 check_gate_port() {
     local port="$1"
-    if ! lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    local in_use=false
+    local proc=""
+
+    if command -v lsof &>/dev/null; then
+        if lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            in_use=true
+            proc=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+        fi
+    elif command -v ss &>/dev/null; then
+        if ss -tlnp "sport = :$port" 2>/dev/null | grep -q LISTEN; then
+            in_use=true
+            proc=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+        fi
+    else
+        echo "  WARN  port:$port — neither lsof nor ss available, skipping"
+        return 0
+    fi
+
+    if $in_use; then
+        echo "  FAIL  port:$port — in use by PID ${proc:-unknown}"
+        return 1
+    else
         echo "  PASS  port:$port — available"
         return 0
-    else
-        local proc
-        proc=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
-        echo "  FAIL  port:$port — in use by PID $proc"
-        return 1
     fi
 }
 
