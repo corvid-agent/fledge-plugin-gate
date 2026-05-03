@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PLUGIN_DIR="${FLEDGE_PLUGIN_DIR:?FLEDGE_PLUGIN_DIR not set — fledge >= 0.15.3 sets it automatically}"
+
+GATEFILE="${FLEDGE_GATE_FILE:-Gatefile}"
+
+usage() {
+    cat <<'EOF'
+fledge gate — pre-condition checks for lanes
+
+USAGE:
+    fledge gate <command> [options]
+
+COMMANDS:
+    check [--file <path>]   Run all gates from Gatefile (or specified file)
+    add <gate>              Add a built-in gate to your Gatefile
+    list                    List available built-in gates
+    status                  Show pass/fail status of all gates without blocking
+
+BUILT-IN GATES:
+    branch:<pattern>        Require current branch matches pattern (glob)
+    clean                   Require clean working tree (no uncommitted changes)
+    env:<VAR>               Require environment variable is set
+    tool:<name>             Require tool is installed (on PATH)
+    file:<path>             Require file exists
+    port:<number>           Require port is available (not in use)
+    rust-version:<semver>   Require minimum Rust version
+    node-version:<semver>   Require minimum Node.js version
+
+GATEFILE FORMAT:
+    One gate per line, comments start with #:
+        branch:main
+        clean
+        env:DATABASE_URL
+        tool:docker
+        file:config/prod.toml
+
+EXAMPLES:
+    fledge gate check
+    fledge gate check --file gates/deploy.txt
+    fledge gate add clean
+    fledge gate status
+EOF
+}
+
+check_gate_branch() {
+    local pattern="$1"
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ -z "$branch" ]]; then
+        echo "  FAIL  branch:$pattern — not in a git repo"
+        return 1
+    fi
+    case "$branch" in
+        $pattern)
+            echo "  PASS  branch:$pattern — on $branch"
+            return 0
+            ;;
+        *)
+            echo "  FAIL  branch:$pattern — on $branch, expected $pattern"
+            return 1
+            ;;
+    esac
+}
+
+check_gate_clean() {
+    if git diff --quiet HEAD 2>/dev/null && git diff --cached --quiet HEAD 2>/dev/null; then
+        local untracked
+        untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -1)
+        if [[ -z "$untracked" ]]; then
+            echo "  PASS  clean — working tree is clean"
+            return 0
+        else
+            echo "  FAIL  clean — untracked files present"
+            return 1
+        fi
+    else
+        echo "  FAIL  clean — uncommitted changes"
+        return 1
+    fi
+}
+
+check_gate_env() {
+    local var="$1"
+    if [[ -n "${!var:-}" ]]; then
+        echo "  PASS  env:$var — set"
+        return 0
+    else
+        echo "  FAIL  env:$var — not set"
+        return 1
+    fi
+}
+
+check_gate_tool() {
+    local tool="$1"
+    if command -v "$tool" >/dev/null 2>&1; then
+        local ver
+        ver=$("$tool" --version 2>/dev/null | head -1 || echo "found")
+        echo "  PASS  tool:$tool — $ver"
+        return 0
+    else
+        echo "  FAIL  tool:$tool — not found on PATH"
+        return 1
+    fi
+}
+
+check_gate_file() {
+    local path="$1"
+    if [[ -e "$path" ]]; then
+        echo "  PASS  file:$path — exists"
+        return 0
+    else
+        echo "  FAIL  file:$path — not found"
+        return 1
+    fi
+}
+
+check_gate_port() {
+    local port="$1"
+    if ! lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "  PASS  port:$port — available"
+        return 0
+    else
+        local proc
+        proc=$(lsof -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+        echo "  FAIL  port:$port — in use by PID $proc"
+        return 1
+    fi
+}
+
+version_ge() {
+    local v1="$1" v2="$2"
+    local IFS='.'
+    local i a b
+    local -a ver1 ver2
+    read -ra ver1 <<< "$v1"
+    read -ra ver2 <<< "$v2"
+    for i in 0 1 2; do
+        a="${ver1[$i]:-0}"
+        b="${ver2[$i]:-0}"
+        if (( a > b )); then return 0; fi
+        if (( a < b )); then return 1; fi
+    done
+    return 0
+}
+
+check_gate_rust_version() {
+    local required="$1"
+    local installed
+    installed=$(rustc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    if [[ -z "$installed" ]]; then
+        echo "  FAIL  rust-version:$required — rustc not found"
+        return 1
+    fi
+    if version_ge "$installed" "$required"; then
+        echo "  PASS  rust-version:$required — have $installed"
+        return 0
+    else
+        echo "  FAIL  rust-version:$required — have $installed"
+        return 1
+    fi
+}
+
+check_gate_node_version() {
+    local required="$1"
+    local installed
+    installed=$(node --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+    if [[ -z "$installed" ]]; then
+        echo "  FAIL  node-version:$required — node not found"
+        return 1
+    fi
+    if version_ge "$installed" "$required"; then
+        echo "  PASS  node-version:$required — have $installed"
+        return 0
+    else
+        echo "  FAIL  node-version:$required — have $installed"
+        return 1
+    fi
+}
+
+run_gate() {
+    local gate="$1"
+    case "$gate" in
+        branch:*)   check_gate_branch "${gate#branch:}" ;;
+        clean)      check_gate_clean ;;
+        env:*)      check_gate_env "${gate#env:}" ;;
+        tool:*)     check_gate_tool "${gate#tool:}" ;;
+        file:*)     check_gate_file "${gate#file:}" ;;
+        port:*)     check_gate_port "${gate#port:}" ;;
+        rust-version:*) check_gate_rust_version "${gate#rust-version:}" ;;
+        node-version:*) check_gate_node_version "${gate#node-version:}" ;;
+        *)
+            echo "  FAIL  unknown gate: $gate"
+            return 1
+            ;;
+    esac
+}
+
+cmd_check() {
+    local file="$GATEFILE"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --file) file="$2"; shift 2 ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ ! -f "$file" ]]; then
+        echo "No $file found. Create one or use 'fledge gate add <gate>'."
+        echo "Run 'fledge gate list' for available gates."
+        exit 1
+    fi
+
+    echo "Running gates from $file..."
+    echo ""
+
+    local total=0
+    local passed=0
+    local failed=0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=$(echo "$line" | sed 's/#.*//' | xargs)
+        [[ -z "$line" ]] && continue
+
+        total=$((total + 1))
+        if run_gate "$line"; then
+            passed=$((passed + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done < "$file"
+
+    echo ""
+    echo "$passed/$total gates passed"
+
+    if [[ $failed -gt 0 ]]; then
+        echo "$failed gate(s) failed — blocking."
+        exit 1
+    else
+        echo "All gates passed."
+        exit 0
+    fi
+}
+
+cmd_status() {
+    local file="$GATEFILE"
+    if [[ ! -f "$file" ]]; then
+        echo "No $file found."
+        exit 1
+    fi
+
+    echo "Gate status:"
+    echo ""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=$(echo "$line" | sed 's/#.*//' | xargs)
+        [[ -z "$line" ]] && continue
+        run_gate "$line" || true
+    done < "$file"
+}
+
+cmd_add() {
+    local gate="${1:?Usage: fledge gate add <gate>}"
+    echo "$gate" >> "$GATEFILE"
+    echo "Added '$gate' to $GATEFILE"
+}
+
+cmd_list() {
+    cat <<'EOF'
+Available built-in gates:
+
+  branch:<pattern>        Current branch matches glob pattern
+  clean                   Working tree is clean (no uncommitted changes)
+  env:<VAR>               Environment variable is set and non-empty
+  tool:<name>             Tool is installed and on PATH
+  file:<path>             File or directory exists
+  port:<number>           TCP port is available (not in use)
+  rust-version:<semver>   Minimum Rust toolchain version
+  node-version:<semver>   Minimum Node.js version
+EOF
+}
+
+case "${1:-}" in
+    check)    shift; cmd_check "$@" ;;
+    add)      shift; cmd_add "$@" ;;
+    list)     cmd_list ;;
+    status)   shift; cmd_status "$@" ;;
+    -h|--help|"") usage ;;
+    *)        echo "Unknown command: $1"; usage; exit 1 ;;
+esac

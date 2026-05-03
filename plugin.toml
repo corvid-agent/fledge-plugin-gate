@@ -1,0 +1,15 @@
+[plugin]
+name = "gate"
+version = "0.1.0"
+description = "Pre-condition gate for lanes — block execution if requirements aren't met"
+author = "corvid-agent"
+
+[[commands]]
+name = "gate"
+description = "Check pre-conditions before continuing a lane"
+binary = "bin/gate"
+
+[capabilities]
+exec = false
+store = false
+metadata = false
