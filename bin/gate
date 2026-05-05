@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck disable=SC2034 # PLUGIN_DIR validates the env var; not used elsewhere
 PLUGIN_DIR="${FLEDGE_PLUGIN_DIR:?FLEDGE_PLUGIN_DIR not set — fledge >= 0.15.3 sets it automatically}"
 
 GATEFILE="${FLEDGE_GATE_FILE:-Gatefile}"
@@ -51,6 +52,7 @@ check_gate_branch() {
         echo "  FAIL  branch:$pattern — not in a git repo"
         return 1
     fi
+    # shellcheck disable=SC2254 # intentional glob match
     case "$branch" in
         $pattern)
             echo "  PASS  branch:$pattern — on $branch"
