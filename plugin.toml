@@ -1,5 +1,5 @@
 [plugin]
-name = "gate"
+name = "fledge-plugin-gate"
 version = "0.1.0"
 description = "Pre-condition gate for lanes — block execution if requirements aren't met"
 author = "corvid-agent"
